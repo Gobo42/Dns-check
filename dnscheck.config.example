@@ -1,0 +1,54 @@
+dns_servers:
+  - name: home
+    address: 192.168.0.1:53
+    priority: 0
+  - name: home-secondary
+    address: 192.168.0.2:53
+    priority: 0
+  - name: home-fallback
+    address: 192.168.0.3:53
+    priority: 10
+
+reference_resolvers:
+  - name: cloudflare
+    address: 1.1.1.1:53
+    priority: 0
+  - name: cloudflare-doh
+    address: https://cloudflare-dns.com/dns-query
+    priority: 0
+  - name: google
+    address: 8.8.8.8:53
+    priority: 10
+
+blocklist:
+  source: ./blocked-names-sample.txt
+
+blocked_signals:
+  hinfo_contains:
+    - locally blocked
+    - dnscrypt-proxy
+  blocked_ips:
+    - 0.0.0.0
+    - 127.0.0.1
+  treat_nxdomain_as_blocked: false
+
+dns:
+  timeout: 3s
+  retries: 2
+  max_cname_depth: 10
+  max_concurrent_queries: 4
+
+crawl:
+  depth: 1
+  max_pages: 10
+  document_extensions:
+    - .html
+    - .htm
+    - .php
+    - .aspx
+    - ""
+  user_agent: dnscheck/0.1
+  insecure_skip_tls_verify: false
+
+output:
+  color: true
