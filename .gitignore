@@ -2,3 +2,12 @@ dnscheck.config
 blocked-names.txt
 dnscheck
 !dnscheck/
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+.codex
+.claude
+.gemini
+.github
+.agents
+
