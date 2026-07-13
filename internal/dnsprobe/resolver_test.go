@@ -143,6 +143,105 @@ func TestProbeLogsResultAtVerboseLevelTwo(t *testing.T) {
 	}
 }
 
+func TestProbeColorsQueryAndResultForPublicAddresses(t *testing.T) {
+	var log bytes.Buffer
+	fake := &fakeExchange{replies: map[string]*dns.Msg{
+		"start.example.": msgWithRR(t, "start.example. 60 IN A 203.0.113.10"),
+	}}
+	resolver := NewResolver(
+		config.ResolverConfig{Name: "test", Address: "198.51.100.5:53"},
+		config.Default().DNS,
+		NewClassifier(config.Default().BlockedSignals),
+		fake,
+		LogOptions{Level: 2, Writer: &log, Color: true},
+	)
+
+	_ = resolver.Probe(context.Background(), "start.example")
+	out := log.String()
+	for _, want := range []string{
+		"resolver=\x1b[32mtest\x1b[0m",
+		"host=\x1b[35mstart.example\x1b[0m",
+		"address=\x1b[35m198.51.100.5:53\x1b[0m",
+		"type=\x1b[35mA\x1b[0m",
+		"ips=\x1b[35m203.0.113.10\x1b[0m",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing colored segment %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestProbeColorsInternalResolverNameYellow(t *testing.T) {
+	var log bytes.Buffer
+	fake := &fakeExchange{replies: map[string]*dns.Msg{
+		"start.example.": msgWithRR(t, "start.example. 60 IN A 203.0.113.10"),
+	}}
+	resolver := NewResolver(
+		config.ResolverConfig{Name: "home", Address: "198.51.100.5:53"},
+		config.Default().DNS,
+		NewClassifier(config.Default().BlockedSignals),
+		fake,
+		LogOptions{Level: 2, Writer: &log, Color: true, Internal: true},
+	)
+
+	_ = resolver.Probe(context.Background(), "start.example")
+	out := log.String()
+	if !strings.Contains(out, "resolver=\x1b[33mhome\x1b[0m") {
+		t.Fatalf("internal resolver name should be yellow:\n%s", out)
+	}
+	if !strings.Contains(out, "dns result resolver=\x1b[33mhome\x1b[0m") {
+		t.Fatalf("internal resolver name should be yellow in dns result too:\n%s", out)
+	}
+}
+
+func TestProbeColorsExternalResolverNameGreen(t *testing.T) {
+	var log bytes.Buffer
+	fake := &fakeExchange{replies: map[string]*dns.Msg{
+		"start.example.": msgWithRR(t, "start.example. 60 IN A 203.0.113.10"),
+	}}
+	resolver := NewResolver(
+		config.ResolverConfig{Name: "cloudflare", Address: "1.1.1.1:53"},
+		config.Default().DNS,
+		NewClassifier(config.Default().BlockedSignals),
+		fake,
+		LogOptions{Level: 2, Writer: &log, Color: true, Internal: false},
+	)
+
+	_ = resolver.Probe(context.Background(), "start.example")
+	out := log.String()
+	if !strings.Contains(out, "resolver=\x1b[32mcloudflare\x1b[0m") {
+		t.Fatalf("external resolver name should be green:\n%s", out)
+	}
+	if !strings.Contains(out, "dns result resolver=\x1b[32mcloudflare\x1b[0m") {
+		t.Fatalf("external resolver name should be green in dns result too:\n%s", out)
+	}
+}
+
+func TestProbeColorsPrivateAddressesYellow(t *testing.T) {
+	var log bytes.Buffer
+	fake := &fakeExchange{replies: map[string]*dns.Msg{
+		"start.example.": msgWithRR(t, "start.example. 60 IN A 10.1.2.3"),
+	}}
+	resolver := NewResolver(
+		config.ResolverConfig{Name: "home", Address: "10.255.255.20:53"},
+		config.Default().DNS,
+		NewClassifier(config.Default().BlockedSignals),
+		fake,
+		LogOptions{Level: 2, Writer: &log, Color: true},
+	)
+
+	_ = resolver.Probe(context.Background(), "start.example")
+	out := log.String()
+	for _, want := range []string{
+		"address=\x1b[33m10.255.255.20:53\x1b[0m",
+		"ips=\x1b[33m10.1.2.3\x1b[0m",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing yellow-colored private address %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestProbeAllLimitsConcurrency(t *testing.T) {
 	var active int32
 	var maxActive int32

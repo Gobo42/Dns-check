@@ -138,6 +138,32 @@ func TestRuntimeOutputGoesToStderr(t *testing.T) {
 	}
 }
 
+func TestRuntimeOutputColorsDNSOnlyTarget(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	err := Main([]string{"--no-crawl", "--color", "https://example.com"}, &stdout, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr.String(), "dns-only check \x1b[34mexample.com\x1b[0m") {
+		t.Fatalf("stderr missing colored dns-only target:\n%s", stderr.String())
+	}
+}
+
+func TestRuntimeOutputColorsScanningURL(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	err := Main([]string{"--color", "https://example.com"}, &stdout, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr.String(), "scanning \x1b[34mhttps://example.com\x1b[0m") {
+		t.Fatalf("stderr missing colored scanning URL:\n%s", stderr.String())
+	}
+}
+
 func TestBlocklistParseErrorsGoToStderr(t *testing.T) {
 	dir := t.TempDir()
 	blocklistPath := filepath.Join(dir, "blocked.txt")
@@ -405,6 +431,15 @@ func TestNewCrawlResolveSkipsReferenceOnNXDOMAINOrError(t *testing.T) {
 				t.Fatalf("resolve = (%q, %v), want (\"\", false)", ip, ok)
 			}
 		})
+	}
+}
+
+func TestColorNum(t *testing.T) {
+	if got := colorNum(4, true); got != "\x1b[35m4\x1b[0m" {
+		t.Fatalf("colorNum(4, true) = %q, want purple-wrapped", got)
+	}
+	if got := colorNum(4, false); got != "4" {
+		t.Fatalf("colorNum(4, false) = %q, want unchanged", got)
 	}
 }
 

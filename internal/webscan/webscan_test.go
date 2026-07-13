@@ -135,6 +135,38 @@ func TestVerboseLevelOneLogsFetchSummary(t *testing.T) {
 	}
 }
 
+func TestVerboseLevelOneColorsFetchSummary(t *testing.T) {
+	var log bytes.Buffer
+	scanner := Scanner{
+		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: 200,
+				Status:     "200 OK",
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`<script src="https://cdn.example/app.js"></script>`)),
+			}, nil
+		})},
+		Log: LogOptions{Level: 1, Writer: &log, Color: true},
+	}
+	cfg := config.Default().Crawl
+	cfg.Depth = 1
+
+	_, err := scanner.Scan("https://origin.example/index.html", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := log.String()
+	for _, want := range []string{
+		"depth=\x1b[35m1\x1b[0m",
+		"crawl fetch depth=\x1b[35m1\x1b[0m url=\x1b[34mhttps://origin.example/index.html\x1b[0m",
+		"crawl extracted url=\x1b[34mhttps://origin.example/index.html\x1b[0m links=\x1b[35m1\x1b[0m hosts=\x1b[35m2\x1b[0m",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing colored segment %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestVerboseLevelTwoLogsDiscoveredLinks(t *testing.T) {
 	var log bytes.Buffer
 	scanner := Scanner{
@@ -160,6 +192,42 @@ func TestVerboseLevelTwoLogsDiscoveredLinks(t *testing.T) {
 	}
 	if !strings.Contains(log.String(), "crawl discovered raw=https://media.example/pixel.png resolved=https://media.example/pixel.png host=media.example document=false queued=false") {
 		t.Fatalf("missing media discovery log:\n%s", log.String())
+	}
+}
+
+func TestVerboseLevelTwoColorsDiscoveredLinks(t *testing.T) {
+	var log bytes.Buffer
+	scanner := Scanner{
+		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: 200,
+				Status:     "200 OK",
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`<a href="https://next.example/page.html">next</a><img src="https://media.example/pixel.png">`)),
+			}, nil
+		})},
+		Log: LogOptions{Level: 2, Writer: &log, Color: true},
+	}
+	cfg := config.Default().Crawl
+	cfg.Depth = 2
+
+	_, err := scanner.Scan("https://origin.example/index.html", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := log.String()
+	for _, want := range []string{
+		"raw=\x1b[34mhttps://next.example/page.html\x1b[0m",
+		"resolved=\x1b[34mhttps://next.example/page.html\x1b[0m",
+		"host=\x1b[35mnext.example\x1b[0m",
+		"document=\x1b[32mtrue\x1b[0m",
+		"queued=\x1b[32mtrue\x1b[0m",
+		"document=\x1b[31mfalse\x1b[0m",
+		"queued=\x1b[31mfalse\x1b[0m",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing colored segment %q:\n%s", want, out)
+		}
 	}
 }
 

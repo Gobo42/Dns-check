@@ -11,8 +11,10 @@ import (
 	"os"
 	"path"
 	"regexp"
+	"strconv"
 	"strings"
 
+	"dnscheck/internal/ansicolor"
 	"dnscheck/internal/config"
 )
 
@@ -30,6 +32,7 @@ type Scanner struct {
 type LogOptions struct {
 	Level  int
 	Writer io.Writer
+	Color  bool
 }
 
 type Result struct {
@@ -84,7 +87,7 @@ func (s Scanner) Scan(rawURL string, cfg config.CrawlConfig) (Result, error) {
 				continue
 			}
 			visited[item] = true
-			s.logf(1, "crawl fetch depth=%d url=%s\n", depth, item)
+			s.logf(1, "crawl fetch depth=%s url=%s\n", colorNum(depth, s.Log.Color), color(item, "blue", s.Log.Color))
 			body, err := s.fetch(item, cfg.UserAgent)
 			if err != nil {
 				result.Warnings = append(result.Warnings, err.Error())
@@ -95,19 +98,28 @@ func (s Scanner) Scan(rawURL string, cfg config.CrawlConfig) (Result, error) {
 			for _, link := range links {
 				resolved := resolveURL(base, link)
 				if resolved == nil || resolved.Hostname() == "" {
-					s.logf(2, "crawl discovered raw=%s resolved= host= document=false queued=false\n", link)
+					s.logf(2, "crawl discovered raw=%s resolved= host= document=%s queued=%s\n",
+						color(link, "blue", s.Log.Color), s.colorBool(false), s.colorBool(false))
 					continue
 				}
 				host := strings.ToLower(resolved.Hostname())
 				result.Hosts[host] = true
 				document := isDocumentLike(resolved, cfg.DocumentExtensions)
 				queued := depth < cfg.Depth && document
-				s.logf(2, "crawl discovered raw=%s resolved=%s host=%s document=%t queued=%t\n", link, resolved.String(), host, document, queued)
+				s.logf(2, "crawl discovered raw=%s resolved=%s host=%s document=%s queued=%s\n",
+					color(link, "blue", s.Log.Color),
+					color(resolved.String(), "blue", s.Log.Color),
+					color(host, "purple", s.Log.Color),
+					s.colorBool(document),
+					s.colorBool(queued))
 				if queued {
 					queue = append(queue, resolved.String())
 				}
 			}
-			s.logf(1, "crawl extracted url=%s links=%d hosts=%d\n", item, len(links), len(result.Hosts))
+			s.logf(1, "crawl extracted url=%s links=%s hosts=%s\n",
+				color(item, "blue", s.Log.Color),
+				colorNum(len(links), s.Log.Color),
+				colorNum(len(result.Hosts), s.Log.Color))
 		}
 	}
 	return result, nil
@@ -123,6 +135,21 @@ func (s Scanner) dialContext(ctx context.Context, network, addr string) (net.Con
 		return dialer.DialContext(ctx, network, net.JoinHostPort(ip, port))
 	}
 	return dialer.DialContext(ctx, network, addr)
+}
+
+func (s Scanner) colorBool(v bool) string {
+	if v {
+		return color("true", "green", s.Log.Color)
+	}
+	return color("false", "red", s.Log.Color)
+}
+
+func color(s, name string, enabled bool) string {
+	return ansicolor.Color(s, name, enabled)
+}
+
+func colorNum(n int, enabled bool) string {
+	return color(strconv.Itoa(n), "purple", enabled)
 }
 
 func (s Scanner) logf(level int, format string, args ...any) {

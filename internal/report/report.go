@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"dnscheck/internal/ansicolor"
 	"dnscheck/internal/blocklist"
 	"dnscheck/internal/dnsprobe"
 )
@@ -219,9 +220,5 @@ func stripANSI(s string) string {
 }
 
 func color(s, name string, enabled bool) string {
-	if !enabled {
-		return s
-	}
-	code := map[string]string{"red": "31", "green": "32", "yellow": "33"}[name]
-	return "\x1b[" + code + "m" + s + "\x1b[0m"
+	return ansicolor.Color(s, name, enabled)
 }

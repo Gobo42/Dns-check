@@ -7,14 +7,20 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
 
+	"dnscheck/internal/ansicolor"
 	"dnscheck/internal/blocklist"
 	"dnscheck/internal/config"
 	"dnscheck/internal/dnsprobe"
 	"dnscheck/internal/report"
 	"dnscheck/internal/webscan"
 )
+
+func colorNum(n int, enabled bool) string {
+	return ansicolor.Color(strconv.Itoa(n), "purple", enabled)
+}
 
 type Options struct {
 	ConfigPath string
@@ -143,16 +149,16 @@ func Main(args []string, stdout io.Writer, stderr io.Writer) error {
 		return resolver.Resolver.Probe(context.Background(), host)
 	}
 	cache := dnsprobe.NewCache()
-	primaryGroups := buildResolverGroups(cfg.DNSServers, cfg, opts.Verbose, stderr, cache)
-	referenceGroups := buildResolverGroups(cfg.ReferenceResolvers, cfg, opts.Verbose, stderr, cache)
+	primaryGroups := buildResolverGroups(cfg.DNSServers, cfg, opts.Verbose, stderr, cache, true)
+	referenceGroups := buildResolverGroups(cfg.ReferenceResolvers, cfg, opts.Verbose, stderr, cache, false)
 
 	if cfg.Crawl.Depth == 0 {
-		fmt.Fprintf(stderr, "dns-only check %s\n", displayTarget(opts.URL))
+		fmt.Fprintf(stderr, "dns-only check %s\n", ansicolor.Color(displayTarget(opts.URL), "blue", cfg.Output.Color))
 	} else {
-		fmt.Fprintf(stderr, "scanning %s\n", opts.URL)
+		fmt.Fprintf(stderr, "scanning %s\n", ansicolor.Color(opts.URL, "blue", cfg.Output.Color))
 	}
 	scanner := webscan.New(cfg.Crawl.InsecureSkipTLSVerify)
-	scanner.Log = webscan.LogOptions{Level: opts.Verbose, Writer: stderr}
+	scanner.Log = webscan.LogOptions{Level: opts.Verbose, Writer: stderr, Color: cfg.Output.Color}
 	scanner.Resolve = newCrawlResolve(primaryGroups, referenceGroups, probe)
 	scanResult, err := scanner.Scan(opts.URL, cfg.Crawl)
 	if err != nil {
@@ -161,7 +167,11 @@ func Main(args []string, stdout io.Writer, stderr io.Writer) error {
 	warnings = append(warnings, scanResult.Warnings...)
 
 	hosts := sortedHosts(scanResult.Hosts)
-	fmt.Fprintf(stderr, "checking %d hosts with %d local resolver groups and %d reference resolver groups, max concurrency %d\n", len(hosts), len(primaryGroups), len(referenceGroups), cfg.DNS.MaxConcurrentQueries)
+	fmt.Fprintf(stderr, "checking %s hosts with %s local resolver groups and %s reference resolver groups, max concurrency %s\n",
+		colorNum(len(hosts), cfg.Output.Color),
+		colorNum(len(primaryGroups), cfg.Output.Color),
+		colorNum(len(referenceGroups), cfg.Output.Color),
+		colorNum(cfg.DNS.MaxConcurrentQueries, cfg.Output.Color))
 	primaryProbed := probeLocalPriorityGroups(hosts, primaryGroups, probe)
 	referenceProbed := probeReferencePriorityGroups(hosts, referenceGroups, probe)
 
@@ -182,7 +192,10 @@ func Main(args []string, stdout io.Writer, stderr io.Writer) error {
 	if len(cfg.DNSServers) > 0 {
 		cnames := collectReferenceCNAMEs(hostResults)
 		if len(cnames) > 0 {
-			fmt.Fprintf(stderr, "checking %d reference cnames with %d local resolver groups, max concurrency %d\n", len(cnames), len(primaryGroups), cfg.DNS.MaxConcurrentQueries)
+			fmt.Fprintf(stderr, "checking %s reference cnames with %s local resolver groups, max concurrency %s\n",
+				colorNum(len(cnames), cfg.Output.Color),
+				colorNum(len(primaryGroups), cfg.Output.Color),
+				colorNum(cfg.DNS.MaxConcurrentQueries, cfg.Output.Color))
 			cnameProbes := probeLocalPriorityGroups(cnames, primaryGroups, probe)
 			mergeCNAMEProbeResults(hostResults, cnameProbes, list)
 		}
@@ -212,7 +225,7 @@ type resolverGroup struct {
 	Resolvers []resolverRef
 }
 
-func buildResolverGroups(configs []config.ResolverConfig, cfg config.Config, verbose int, log io.Writer, cache *dnsprobe.Cache) []resolverGroup {
+func buildResolverGroups(configs []config.ResolverConfig, cfg config.Config, verbose int, log io.Writer, cache *dnsprobe.Cache, internal bool) []resolverGroup {
 	classifier := dnsprobe.NewClassifier(cfg.BlockedSignals)
 	byPriority := map[int][]resolverRef{}
 	for _, resolverCfg := range configs {
@@ -224,7 +237,7 @@ func buildResolverGroups(configs []config.ResolverConfig, cfg config.Config, ver
 				cfg.DNS,
 				classifier,
 				dnsprobe.NewExchange(resolverCfg.Address, cfg.Crawl.InsecureSkipTLSVerify),
-				dnsprobe.LogOptions{Level: verbose, Writer: log},
+				dnsprobe.LogOptions{Level: verbose, Writer: log, Color: cfg.Output.Color, Internal: internal},
 			).WithCache(cache),
 		}
 		byPriority[resolverCfg.Priority] = append(byPriority[resolverCfg.Priority], ref)

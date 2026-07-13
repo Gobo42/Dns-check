@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"sort"
@@ -13,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"dnscheck/internal/ansicolor"
 	"dnscheck/internal/config"
 	"github.com/miekg/dns"
 )
@@ -36,8 +38,10 @@ type HostProbeResult struct {
 }
 
 type LogOptions struct {
-	Level  int
-	Writer io.Writer
+	Level    int
+	Writer   io.Writer
+	Color    bool
+	Internal bool
 }
 
 func NewResolver(cfg config.ResolverConfig, dnsCfg config.DNSConfig, classifier Classifier, exchange Exchanger, logOptions ...LogOptions) Resolver {
@@ -113,7 +117,11 @@ func (r Resolver) logQuery(host string) {
 	if r.log.Level < 1 || r.log.Writer == nil {
 		return
 	}
-	fmt.Fprintf(r.log.Writer, "dns query resolver=%s host=%s address=%s type=A\n", r.cfg.Name, host, r.cfg.Address)
+	fmt.Fprintf(r.log.Writer, "dns query resolver=%s host=%s address=%s type=%s\n",
+		r.colorResolverName(),
+		ansicolor.Color(host, "purple", r.log.Color),
+		colorAddress(r.cfg.Address, r.log.Color),
+		ansicolor.Color("A", "purple", r.log.Color))
 }
 
 func (r Resolver) logResult(host string, classification Classification) {
@@ -121,23 +129,67 @@ func (r Resolver) logResult(host string, classification Classification) {
 		return
 	}
 	parts := []string{
-		fmt.Sprintf("dns result resolver=%s", r.cfg.Name),
-		fmt.Sprintf("host=%s", host),
+		fmt.Sprintf("dns result resolver=%s", r.colorResolverName()),
+		fmt.Sprintf("host=%s", ansicolor.Color(host, "purple", r.log.Color)),
 		fmt.Sprintf("status=%s", classification.Status),
 	}
 	if classification.BlockedBy != "" {
 		parts = append(parts, "blocked_by="+classification.BlockedBy)
 	}
 	if len(classification.CNAMEs) > 0 {
-		parts = append(parts, "cnames="+strings.Join(classification.CNAMEs, ","))
+		colored := make([]string, len(classification.CNAMEs))
+		for i, name := range classification.CNAMEs {
+			colored[i] = ansicolor.Color(name, "purple", r.log.Color)
+		}
+		parts = append(parts, "cnames="+strings.Join(colored, ","))
 	}
 	if len(classification.IPs) > 0 {
-		parts = append(parts, "ips="+strings.Join(classification.IPs, ","))
+		colored := make([]string, len(classification.IPs))
+		for i, ip := range classification.IPs {
+			colored[i] = colorIP(ip, r.log.Color)
+		}
+		parts = append(parts, "ips="+strings.Join(colored, ","))
 	}
 	if classification.Error != "" {
 		parts = append(parts, "error="+classification.Error)
 	}
 	fmt.Fprintln(r.log.Writer, strings.Join(parts, " "))
+}
+
+// colorResolverName colors the resolver's name yellow if it is one of the
+// internal (primary, dns_servers) resolvers being diagnosed, or green if it
+// is an external reference resolver.
+func (r Resolver) colorResolverName() string {
+	if r.log.Internal {
+		return ansicolor.Color(r.cfg.Name, "yellow", r.log.Color)
+	}
+	return ansicolor.Color(r.cfg.Name, "green", r.log.Color)
+}
+
+// colorAddress colors a resolver address (host:port, or a DoH URL) purple,
+// or yellow if its host portion is a private/loopback IP.
+func colorAddress(address string, enabled bool) string {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		host = address
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if _, private := classifyPrivateIP(ip); private {
+			return ansicolor.Color(address, "yellow", enabled)
+		}
+	}
+	return ansicolor.Color(address, "purple", enabled)
+}
+
+// colorIP colors a resolved IP address purple, or yellow if it is a
+// private/loopback address.
+func colorIP(ipStr string, enabled bool) string {
+	if ip := net.ParseIP(ipStr); ip != nil {
+		if _, private := classifyPrivateIP(ip); private {
+			return ansicolor.Color(ipStr, "yellow", enabled)
+		}
+	}
+	return ansicolor.Color(ipStr, "purple", enabled)
 }
 
 func ProbeAll(ctx context.Context, hosts []string, resolvers []Resolver, maxConcurrent int) []HostProbeResult {
