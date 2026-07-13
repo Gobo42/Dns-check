@@ -220,6 +220,45 @@ func TestTextReportDeduplicatesBlockedChainMembers(t *testing.T) {
 	}
 }
 
+func TestColorReportMarksPrivateIPResolutionAsBlocked(t *testing.T) {
+	run := Run{
+		Hosts: []HostResult{{
+			Host: "sinkholed.example",
+			Primary: []dnsprobe.ResolverResult{{
+				ResolverName: "home",
+				Status:       dnsprobe.StatusPrivate,
+				Steps: []dnsprobe.ChainStep{{
+					Name:           "sinkholed.example",
+					Classification: dnsprobe.Classification{Status: dnsprobe.StatusPrivate, BlockedBy: "rfc1918", IPs: []string{"10.1.2.3"}},
+				}},
+			}},
+		}},
+	}
+
+	out := Text(run, Options{Color: true})
+	if !strings.Contains(out, "\x1b[31msinkholed.example\x1b[0m") {
+		t.Fatalf("private-IP host not shown in red Blocked hosts section:\n%s", out)
+	}
+	if !strings.Contains(out, "blocked chain member: \x1b[31msinkholed.example\x1b[0m") {
+		t.Fatalf("private-IP chain member not marked as blocked:\n%s", out)
+	}
+	if strings.Contains(out, "\x1b[32msinkholed.example\x1b[0m") {
+		t.Fatalf("private-IP host should not also appear in Allowed section:\n%s", out)
+	}
+}
+
+func TestWarningsSectionRendersYellow(t *testing.T) {
+	run := Run{
+		Hosts:    []HostResult{{Host: "sinkholed.example", Primary: []dnsprobe.ResolverResult{{Status: dnsprobe.StatusPrivate}}}},
+		Warnings: []string{"sinkholed.example resolved to private address 10.1.2.3 (rfc1918) via resolver home"},
+	}
+
+	out := Text(run, Options{Color: true})
+	if !strings.Contains(out, "\x1b[33msinkholed.example resolved to private address 10.1.2.3 (rfc1918) via resolver home\x1b[0m") {
+		t.Fatalf("private-IP warning not shown in yellow:\n%s", out)
+	}
+}
+
 func TestJSONReportSerializes(t *testing.T) {
 	data, err := JSON(Run{Hosts: []HostResult{{Host: "example.com"}}})
 	if err != nil {

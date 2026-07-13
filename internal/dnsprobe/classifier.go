@@ -1,6 +1,7 @@
 package dnsprobe
 
 import (
+	"net"
 	"strings"
 
 	"dnscheck/internal/config"
@@ -9,6 +10,33 @@ import (
 
 type Classifier struct {
 	signals config.BlockedSignals
+}
+
+var privateIPBlocks = []struct {
+	network *net.IPNet
+	reason  string
+}{
+	{mustParseCIDR("10.0.0.0/8"), "rfc1918"},
+	{mustParseCIDR("172.16.0.0/12"), "rfc1918"},
+	{mustParseCIDR("192.168.0.0/16"), "rfc1918"},
+	{mustParseCIDR("127.0.0.0/8"), "loopback"},
+}
+
+func mustParseCIDR(cidr string) *net.IPNet {
+	_, network, err := net.ParseCIDR(cidr)
+	if err != nil {
+		panic(err)
+	}
+	return network
+}
+
+func classifyPrivateIP(ip net.IP) (reason string, private bool) {
+	for _, block := range privateIPBlocks {
+		if block.network.Contains(ip) {
+			return block.reason, true
+		}
+	}
+	return "", false
 }
 
 func NewClassifier(signals config.BlockedSignals) Classifier {
@@ -41,6 +69,9 @@ func (c Classifier) Classify(msg *dns.Msg) Classification {
 			ip := rr.A.String()
 			if c.isBlockedIP(ip) {
 				return Classification{Status: StatusBlocked, BlockedBy: "blocked_ip", IPs: []string{ip}}
+			}
+			if reason, private := classifyPrivateIP(rr.A); private {
+				return Classification{Status: StatusPrivate, BlockedBy: reason, IPs: []string{ip}}
 			}
 			ips = append(ips, ip)
 		case *dns.AAAA:

@@ -130,6 +130,7 @@ For each resolver, the tool follows CNAMEs until one of these terminal states oc
 
 - one or more IP addresses are reached
 - a configured blocked signal is received
+- a private/loopback IP address is reached (see Private/Loopback Address Detection)
 - `NXDOMAIN` or another terminal DNS response is received
 - timeout or network error after configured retries
 - `dns.max_cname_depth` is reached
@@ -153,6 +154,28 @@ To avoid hammering external DNS servers, DNS checks are concurrency-limited. The
 Reference chains should print every CNAME target in order when the resolver response contains the full chain. With color enabled, chain hostnames that match the configured blocklist are red and non-matching chain hostnames are green. This makes it clear whether an early CNAME, middle CNAME, or final CNAME is the blocked name.
 
 Every CNAME discovered from reference resolver chains is also queried against the configured primary DNS servers. If those follow-up local probes are blocked, the matching chain member is reported and colored red. If multiple CNAMEs match different blocklist entries, every matched line is listed and every corresponding sed command is emitted.
+
+## Private/Loopback Address Detection
+
+In addition to the configured `blocked_signals`, any `A` record answer that falls in an RFC1918 private range (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) or the full IPv4 loopback range (`127.0.0.0/8`) is classified as its own terminal state, separate from an explicit blocked signal. This catches local sinkhole/redirect DNS blocking that answers with a private address instead of an explicit HINFO or blocked-IP signal. Detection is IPv4-only for the first version; IPv6 loopback (`::1`) and unique local addresses (`fc00::/7`) are not checked.
+
+An explicit `blocked_signals.blocked_ips` match still takes priority over the private/loopback classification when an address matches both — for example, the default `blocked_ips` entry `127.0.0.1` is reported as an explicit `blocked_ip` match rather than a loopback match.
+
+Private/loopback answers are treated as blocked for summary purposes — the host and chain member are shown in the red "Blocked hosts" section the same as an explicit block — but are also called out individually with a yellow warning line naming the specific address and whether it matched the RFC1918 or loopback range, so the two block mechanisms stay distinguishable in the output.
+
+## Crawler DNS Resolution
+
+The web crawler's own page fetches resolve hostnames the same way the diagnostic probe does, instead of going through the OS resolver. Before dialing a hostname it is about to fetch, the crawler queries the primary DNS servers first:
+
+- if the primary answer resolves to a normal address, the crawler connects to that IP
+- if the primary answer is blocked, or is a private/loopback address, the crawler falls back to the reference resolvers and connects to their resolved IP instead
+- if neither the primary nor the reference resolvers return a usable address, the crawler falls through to normal OS-level DNS resolution rather than failing the fetch outright
+
+The crawler never connects to a blocked sinkhole or private address returned by a resolver — only an address from a clean, non-blocked, non-private result is ever dialed. TLS certificate validation and the `Host` header still use the original hostname; only the underlying connection target changes, so this is invisible to the fetched site.
+
+When no `dns_servers` are configured, the crawler behaves exactly as before, resolving through the OS resolver for every fetch.
+
+Wire-level DNS queries are cached per run and shared between the crawler's lookups and the later diagnostic probe, so a host resolved once while crawling is not queried again during reporting.
 
 ## Blocklist Parsing And Matching
 
@@ -205,7 +228,7 @@ Allowed hostnames are printed for manual allowlist decisions. The tool does not 
 
 `--json` emits a machine-readable representation of the same information for future scripting.
 
-`--color` or `output.color: true` enables ANSI color in human-readable output. Blocked hosts and blocked chain members are red. Hosts that resolve correctly are green. Warnings, including TLS certificate warnings or ignored TLS verification, are yellow. Color is disabled by default so output remains easy to pipe into other tools.
+`--color` or `output.color: true` enables ANSI color in human-readable output. Blocked hosts and blocked chain members, including chain members that resolved to a private/loopback address, are red. Hosts that resolve correctly are green. Warnings, including TLS certificate warnings, ignored TLS verification, and private/loopback DNS answers, are yellow. Color is disabled by default so output remains easy to pipe into other tools.
 
 Runtime progress and diagnostic chatter is written to stderr. The final human-readable or JSON report is written to stdout so bash pipelines can consume it cleanly.
 
@@ -227,8 +250,8 @@ Responsibilities:
 - `cmd/dnscheck`: parse CLI flags, load config, run the workflow
 - `internal/config`: defaults, config loading, validation
 - `internal/blocklist`: source loading, parsing, matching, sed escaping
-- `internal/dnsprobe`: classic DNS and DoH resolver clients, retries, CNAME traversal, blocked-response classification
-- `internal/webscan`: URL normalization, HTTPS/TLS policy, document fetching, hostname extraction, document-recursion control
+- `internal/dnsprobe`: classic DNS and DoH resolver clients, retries, CNAME traversal, blocked-response classification, private/loopback address classification
+- `internal/webscan`: URL normalization, HTTPS/TLS policy, document fetching, hostname extraction, document-recursion control, dialing through an injected DNS resolution override
 - `internal/report`: text, ANSI color, and JSON output formatting
 
 ## Testing
@@ -239,8 +262,11 @@ Unit tests should cover behavior that is easy to get subtly wrong:
 - blocklist source line-number reporting
 - sed escaping and exact-line anchoring
 - DNS result classification for HINFO blocked responses, CNAME chains, timeout, NXDOMAIN, and IP terminal states
+- DNS classification for private/loopback IPv4 addresses (RFC1918 ranges and the full `127.0.0.0/8` range), including precedence against an explicit `blocked_ips` match, and that CNAME traversal stops cleanly on a private answer instead of running to `max_cname_depth`
 - DNS concurrency limiting so discovered hosts do not hammer external resolvers
 - resolver priority and fallback behavior for primary and reference DNS servers
+- crawler DNS resolution: primary-first resolution, fallback to reference resolvers only on a blocked or private primary answer, and that the crawler never dials a sinkhole or private address
+- shared DNS query cache between the crawler and the diagnostic probe so a host resolved once is not queried again
 - reference-chain output where only blocklist-matching CNAME members are red
 - follow-up local DNS probes for every CNAME discovered from reference resolvers
 - verbose stderr logging for each DNS query with `-v` and each DNS query/result with `-vv`
@@ -265,3 +291,4 @@ Manual or optional local integration tests can use the user's test DNS server an
 - deleting blocklist entries automatically
 - crawling the open web without `crawl.max_pages`
 - disabling TLS verification by default
+- IPv6 loopback (`::1`) or unique local address (`fc00::/7`) detection

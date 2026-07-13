@@ -2,8 +2,12 @@ package webscan
 
 import (
 	"bytes"
+	"context"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -156,6 +160,119 @@ func TestVerboseLevelTwoLogsDiscoveredLinks(t *testing.T) {
 	}
 	if !strings.Contains(log.String(), "crawl discovered raw=https://media.example/pixel.png resolved=https://media.example/pixel.png host=media.example document=false queued=false") {
 		t.Fatalf("missing media discovery log:\n%s", log.String())
+	}
+}
+
+func TestDialContextDialsResolvedIP(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		conn, err := listener.Accept()
+		if err == nil {
+			conn.Close()
+		}
+	}()
+
+	port := listener.Addr().(*net.TCPAddr).Port
+	s := Scanner{Resolve: func(ctx context.Context, host string) (string, bool) {
+		if host != "fake.invalid" {
+			t.Fatalf("resolve called with host = %q, want fake.invalid", host)
+		}
+		return "127.0.0.1", true
+	}}
+
+	conn, err := s.dialContext(context.Background(), "tcp", fmt.Sprintf("fake.invalid:%d", port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+}
+
+func TestDialContextFallsBackWhenResolveDeclines(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		conn, err := listener.Accept()
+		if err == nil {
+			conn.Close()
+		}
+	}()
+
+	port := listener.Addr().(*net.TCPAddr).Port
+	s := Scanner{Resolve: func(ctx context.Context, host string) (string, bool) {
+		return "", false
+	}}
+
+	conn, err := s.dialContext(context.Background(), "tcp", fmt.Sprintf("localhost:%d", port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+}
+
+func TestDialContextSkipsResolveForIPLiteralAddr(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		conn, err := listener.Accept()
+		if err == nil {
+			conn.Close()
+		}
+	}()
+
+	port := listener.Addr().(*net.TCPAddr).Port
+	called := false
+	s := Scanner{Resolve: func(ctx context.Context, host string) (string, bool) {
+		called = true
+		return "", false
+	}}
+
+	conn, err := s.dialContext(context.Background(), "tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	if called {
+		t.Fatal("Resolve should not be called for an IP-literal address")
+	}
+}
+
+func TestScanUsesResolveToReachFakeHostname(t *testing.T) {
+	var requests int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Write([]byte(`<html></html>`))
+	}))
+	defer srv.Close()
+
+	port := srv.Listener.Addr().(*net.TCPAddr).Port
+	scanner := Scanner{Resolve: func(ctx context.Context, host string) (string, bool) {
+		if host == "mysite.invalid" {
+			return "127.0.0.1", true
+		}
+		return "", false
+	}}
+	cfg := config.Default().Crawl
+	cfg.Depth = 1
+
+	result, err := scanner.Scan(fmt.Sprintf("http://mysite.invalid:%d/", port), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want 1 (fetch should have reached the test server via the resolved IP)", requests)
+	}
+	if !result.Hosts["mysite.invalid"] {
+		t.Fatalf("hosts = %#v, want mysite.invalid", result.Hosts)
 	}
 }
 

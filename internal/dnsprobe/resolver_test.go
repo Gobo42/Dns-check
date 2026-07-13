@@ -61,6 +61,25 @@ func TestProbeStopsOnBlockedCNAMEMember(t *testing.T) {
 	}
 }
 
+func TestProbeStopsOnPrivateCNAMEMember(t *testing.T) {
+	fake := &fakeExchange{replies: map[string]*dns.Msg{
+		"start.example.":       msgWithRR(t, "start.example. 60 IN CNAME sinkhole.vendor.net."),
+		"sinkhole.vendor.net.": msgWithRR(t, "sinkhole.vendor.net. 60 IN A 10.0.0.5"),
+	}}
+	resolver := NewResolver(config.ResolverConfig{Name: "test", Address: "127.0.0.1:53"}, config.Default().DNS, NewClassifier(config.Default().BlockedSignals), fake)
+
+	result := resolver.Probe(context.Background(), "start.example")
+	if result.Status != StatusPrivate {
+		t.Fatalf("status = %s, want private", result.Status)
+	}
+	if len(result.Steps) != 2 {
+		t.Fatalf("steps = %d, want 2 (should stop at the private answer, not spin to max cname depth)", len(result.Steps))
+	}
+	if fake.calls != 2 {
+		t.Fatalf("calls = %d, want 2", fake.calls)
+	}
+}
+
 func TestProbeRetriesTimeouts(t *testing.T) {
 	cfg := config.Default()
 	cfg.DNS.Retries = 2

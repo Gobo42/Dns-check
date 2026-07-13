@@ -2,14 +2,17 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"dnscheck/internal/blocklist"
+	"dnscheck/internal/config"
 	"dnscheck/internal/dnsprobe"
 	"dnscheck/internal/report"
+	"github.com/miekg/dns"
 )
 
 func TestParseFlagsNoCrawlOverridesConfig(t *testing.T) {
@@ -255,6 +258,229 @@ func TestSelectLocalPriorityRoundRobinAndFallback(t *testing.T) {
 	if got := results[2].Results[len(results[2].Results)-1].ResolverName; got != "home-fallback" {
 		t.Fatalf("fallback resolver = %s, want home-fallback", got)
 	}
+}
+
+func resolvedResult(ip string) dnsprobe.ResolverResult {
+	return dnsprobe.ResolverResult{
+		Status: dnsprobe.StatusResolved,
+		Steps:  []dnsprobe.ChainStep{{Classification: dnsprobe.Classification{Status: dnsprobe.StatusResolved, IPs: []string{ip}}}},
+	}
+}
+
+func blockedResult(sinkholeIP string) dnsprobe.ResolverResult {
+	return dnsprobe.ResolverResult{
+		Status: dnsprobe.StatusBlocked,
+		Steps:  []dnsprobe.ChainStep{{Classification: dnsprobe.Classification{Status: dnsprobe.StatusBlocked, IPs: []string{sinkholeIP}}}},
+	}
+}
+
+func privateResult(privateIP string) dnsprobe.ResolverResult {
+	return dnsprobe.ResolverResult{
+		Status: dnsprobe.StatusPrivate,
+		Steps:  []dnsprobe.ChainStep{{Classification: dnsprobe.Classification{Status: dnsprobe.StatusPrivate, IPs: []string{privateIP}}}},
+	}
+}
+
+func TestNewCrawlResolveNoDNSServersConfigured(t *testing.T) {
+	probe := func(resolver resolverRef, host string) dnsprobe.ResolverResult {
+		t.Fatal("probe should not be called when no dns_servers are configured")
+		return dnsprobe.ResolverResult{}
+	}
+	resolve := newCrawlResolve(nil, []resolverGroup{{Resolvers: []resolverRef{{Name: "ref"}}}}, probe)
+
+	ip, ok := resolve(context.Background(), "example.com")
+	if ok || ip != "" {
+		t.Fatalf("resolve = (%q, %v), want (\"\", false)", ip, ok)
+	}
+}
+
+func TestNewCrawlResolveReturnsPrimaryIPWhenResolved(t *testing.T) {
+	primaryGroups := []resolverGroup{{Resolvers: []resolverRef{{Name: "home"}}}}
+	probe := func(resolver resolverRef, host string) dnsprobe.ResolverResult {
+		if resolver.Name != "home" {
+			t.Fatalf("unexpected resolver probed: %s", resolver.Name)
+		}
+		return resolvedResult("203.0.113.10")
+	}
+	resolve := newCrawlResolve(primaryGroups, nil, probe)
+
+	ip, ok := resolve(context.Background(), "example.com")
+	if !ok || ip != "203.0.113.10" {
+		t.Fatalf("resolve = (%q, %v), want (203.0.113.10, true)", ip, ok)
+	}
+}
+
+func TestNewCrawlResolveFallsBackToReferenceWhenPrimaryBlocked(t *testing.T) {
+	primaryGroups := []resolverGroup{{Resolvers: []resolverRef{{Name: "home"}}}}
+	referenceGroups := []resolverGroup{{Resolvers: []resolverRef{{Name: "cloudflare"}}}}
+	probe := func(resolver resolverRef, host string) dnsprobe.ResolverResult {
+		switch resolver.Name {
+		case "home":
+			return blockedResult("0.0.0.0")
+		case "cloudflare":
+			return resolvedResult("198.51.100.20")
+		}
+		t.Fatalf("unexpected resolver probed: %s", resolver.Name)
+		return dnsprobe.ResolverResult{}
+	}
+	resolve := newCrawlResolve(primaryGroups, referenceGroups, probe)
+
+	ip, ok := resolve(context.Background(), "example.com")
+	if !ok || ip != "198.51.100.20" {
+		t.Fatalf("resolve = (%q, %v), want (198.51.100.20, true)", ip, ok)
+	}
+}
+
+func TestNewCrawlResolveFallsBackToReferenceWhenPrimaryPrivate(t *testing.T) {
+	primaryGroups := []resolverGroup{{Resolvers: []resolverRef{{Name: "home"}}}}
+	referenceGroups := []resolverGroup{{Resolvers: []resolverRef{{Name: "cloudflare"}}}}
+	probe := func(resolver resolverRef, host string) dnsprobe.ResolverResult {
+		switch resolver.Name {
+		case "home":
+			return privateResult("10.1.2.3")
+		case "cloudflare":
+			return resolvedResult("198.51.100.20")
+		}
+		t.Fatalf("unexpected resolver probed: %s", resolver.Name)
+		return dnsprobe.ResolverResult{}
+	}
+	resolve := newCrawlResolve(primaryGroups, referenceGroups, probe)
+
+	ip, ok := resolve(context.Background(), "example.com")
+	if !ok || ip != "198.51.100.20" {
+		t.Fatalf("resolve = (%q, %v), want (198.51.100.20, true)", ip, ok)
+	}
+}
+
+func TestNewCrawlResolveNeverReturnsSinkholeOrPrivateIP(t *testing.T) {
+	cases := []struct {
+		name      string
+		primary   dnsprobe.ResolverResult
+		reference dnsprobe.ResolverResult
+	}{
+		{"reference also blocked", blockedResult("0.0.0.0"), blockedResult("127.0.0.1")},
+		{"reference also private", blockedResult("0.0.0.0"), privateResult("10.0.0.5")},
+		{"reference errors", privateResult("10.0.0.5"), dnsprobe.ResolverResult{Status: dnsprobe.StatusError}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			primaryGroups := []resolverGroup{{Resolvers: []resolverRef{{Name: "home"}}}}
+			referenceGroups := []resolverGroup{{Resolvers: []resolverRef{{Name: "cloudflare"}}}}
+			probe := func(resolver resolverRef, host string) dnsprobe.ResolverResult {
+				switch resolver.Name {
+				case "home":
+					return c.primary
+				case "cloudflare":
+					return c.reference
+				}
+				t.Fatalf("unexpected resolver probed: %s", resolver.Name)
+				return dnsprobe.ResolverResult{}
+			}
+			resolve := newCrawlResolve(primaryGroups, referenceGroups, probe)
+
+			ip, ok := resolve(context.Background(), "example.com")
+			if ok || ip != "" {
+				t.Fatalf("resolve = (%q, %v), want (\"\", false) - must never dial a sinkhole/private IP", ip, ok)
+			}
+		})
+	}
+}
+
+func TestNewCrawlResolveSkipsReferenceOnNXDOMAINOrError(t *testing.T) {
+	cases := []dnsprobe.Status{dnsprobe.StatusNXDOMAIN, dnsprobe.StatusError}
+	for _, status := range cases {
+		t.Run(string(status), func(t *testing.T) {
+			primaryGroups := []resolverGroup{{Resolvers: []resolverRef{{Name: "home"}}}}
+			referenceGroups := []resolverGroup{{Resolvers: []resolverRef{{Name: "cloudflare"}}}}
+			probe := func(resolver resolverRef, host string) dnsprobe.ResolverResult {
+				if resolver.Name == "cloudflare" {
+					t.Fatal("reference resolver should not be probed on NXDOMAIN/Error")
+				}
+				return dnsprobe.ResolverResult{Status: status}
+			}
+			resolve := newCrawlResolve(primaryGroups, referenceGroups, probe)
+
+			ip, ok := resolve(context.Background(), "example.com")
+			if ok || ip != "" {
+				t.Fatalf("resolve = (%q, %v), want (\"\", false)", ip, ok)
+			}
+		})
+	}
+}
+
+func TestCollectPrivateWarnings(t *testing.T) {
+	results := []dnsprobe.ResolverResult{{
+		ResolverName: "home",
+		Steps: []dnsprobe.ChainStep{
+			{Name: "example.com", Classification: dnsprobe.Classification{Status: dnsprobe.StatusResolved, IPs: []string{"203.0.113.10"}}},
+			{Name: "sinkhole.vendor.net", Classification: dnsprobe.Classification{Status: dnsprobe.StatusPrivate, BlockedBy: "rfc1918", IPs: []string{"10.1.2.3"}}},
+		},
+	}}
+
+	warnings := collectPrivateWarnings(results)
+	if len(warnings) != 1 {
+		t.Fatalf("warnings = %#v, want 1", warnings)
+	}
+	if !strings.Contains(warnings[0], "sinkhole.vendor.net") || !strings.Contains(warnings[0], "10.1.2.3") || !strings.Contains(warnings[0], "rfc1918") || !strings.Contains(warnings[0], "home") {
+		t.Fatalf("warning = %q, missing expected details", warnings[0])
+	}
+}
+
+// countingExchanger mimics a wire DNS exchange, counting how many times each
+// query name was actually sent - used to prove a shared dnsprobe.Cache
+// (as wired into every resolverRef by buildResolverGroups) dedupes queries
+// between the crawler's dial-time lookups and the report-time probe.
+type countingExchanger struct {
+	replies map[string]*dns.Msg
+	calls   map[string]int
+}
+
+func (c *countingExchanger) ExchangeContext(ctx context.Context, msg *dns.Msg, address string) (*dns.Msg, error) {
+	if c.calls == nil {
+		c.calls = map[string]int{}
+	}
+	name := msg.Question[0].Name
+	c.calls[name]++
+	return c.replies[name], nil
+}
+
+func TestSharedCacheDedupesWireQueriesAcrossCrawlAndReportProbing(t *testing.T) {
+	fake := &countingExchanger{replies: map[string]*dns.Msg{
+		"example.com.": mustA(t, "example.com. 60 IN A 203.0.113.10"),
+	}}
+	cfg := config.Default()
+	cache := dnsprobe.NewCache()
+	resolver := dnsprobe.NewResolver(
+		config.ResolverConfig{Name: "home", Address: "127.0.0.1:53"},
+		cfg.DNS,
+		dnsprobe.NewClassifier(cfg.BlockedSignals),
+		fake,
+	).WithCache(cache)
+	primaryGroups := []resolverGroup{{Resolvers: []resolverRef{{Name: "home", Resolver: resolver}}}}
+	probe := func(resolver resolverRef, host string) dnsprobe.ResolverResult {
+		return resolver.Resolver.Probe(context.Background(), host)
+	}
+
+	// Simulate a crawl-time lookup followed by the post-crawl report probe
+	// for the same host, exactly like Main() does when they share one cache.
+	newCrawlResolve(primaryGroups, nil, probe)(context.Background(), "example.com")
+	probeLocalPriorityGroups([]string{"example.com"}, primaryGroups, probe)
+
+	if got := fake.calls["example.com."]; got != 1 {
+		t.Fatalf("wire calls for example.com = %d, want 1 (shared cache should dedupe the report probe)", got)
+	}
+}
+
+func mustA(t *testing.T, rrText string) *dns.Msg {
+	t.Helper()
+	rr, err := dns.NewRR(rrText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := new(dns.Msg)
+	msg.SetQuestion(rr.Header().Name, dns.TypeA)
+	msg.Answer = []dns.RR{rr}
+	return msg
 }
 
 func TestSelectReferencePriorityGroupsUseFallbackOnlyIfGroupFails(t *testing.T) {

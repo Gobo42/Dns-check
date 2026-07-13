@@ -139,6 +139,13 @@ func Main(args []string, stdout io.Writer, stderr io.Writer) error {
 		warnings = append(warnings, "HTTPS certificate verification disabled by -k or config")
 	}
 
+	probe := func(resolver resolverRef, host string) dnsprobe.ResolverResult {
+		return resolver.Resolver.Probe(context.Background(), host)
+	}
+	cache := dnsprobe.NewCache()
+	primaryGroups := buildResolverGroups(cfg.DNSServers, cfg, opts.Verbose, stderr, cache)
+	referenceGroups := buildResolverGroups(cfg.ReferenceResolvers, cfg, opts.Verbose, stderr, cache)
+
 	if cfg.Crawl.Depth == 0 {
 		fmt.Fprintf(stderr, "dns-only check %s\n", displayTarget(opts.URL))
 	} else {
@@ -146,6 +153,7 @@ func Main(args []string, stdout io.Writer, stderr io.Writer) error {
 	}
 	scanner := webscan.New(cfg.Crawl.InsecureSkipTLSVerify)
 	scanner.Log = webscan.LogOptions{Level: opts.Verbose, Writer: stderr}
+	scanner.Resolve = newCrawlResolve(primaryGroups, referenceGroups, probe)
 	scanResult, err := scanner.Scan(opts.URL, cfg.Crawl)
 	if err != nil {
 		return fmt.Errorf("scan URL: %w", err)
@@ -153,15 +161,9 @@ func Main(args []string, stdout io.Writer, stderr io.Writer) error {
 	warnings = append(warnings, scanResult.Warnings...)
 
 	hosts := sortedHosts(scanResult.Hosts)
-	primaryGroups := buildResolverGroups(cfg.DNSServers, cfg, opts.Verbose, stderr)
-	referenceGroups := buildResolverGroups(cfg.ReferenceResolvers, cfg, opts.Verbose, stderr)
 	fmt.Fprintf(stderr, "checking %d hosts with %d local resolver groups and %d reference resolver groups, max concurrency %d\n", len(hosts), len(primaryGroups), len(referenceGroups), cfg.DNS.MaxConcurrentQueries)
-	primaryProbed := probeLocalPriorityGroups(hosts, primaryGroups, func(resolver resolverRef, host string) dnsprobe.ResolverResult {
-		return resolver.Resolver.Probe(context.Background(), host)
-	})
-	referenceProbed := probeReferencePriorityGroups(hosts, referenceGroups, func(resolver resolverRef, host string) dnsprobe.ResolverResult {
-		return resolver.Resolver.Probe(context.Background(), host)
-	})
+	primaryProbed := probeLocalPriorityGroups(hosts, primaryGroups, probe)
+	referenceProbed := probeReferencePriorityGroups(hosts, referenceGroups, probe)
 
 	var hostResults []report.HostResult
 	for i, item := range primaryProbed {
@@ -173,6 +175,7 @@ func Main(args []string, stdout io.Writer, stderr io.Writer) error {
 		if len(list.Rules) > 0 {
 			hostResult.Matches, hostResult.BlockedNames = matchesForHostAndChainMembers(list, item.Host, hostResult.Primary, hostResult.Reference)
 		}
+		warnings = append(warnings, collectPrivateWarnings(hostResult.Primary)...)
 		hostResults = append(hostResults, hostResult)
 	}
 
@@ -180,9 +183,7 @@ func Main(args []string, stdout io.Writer, stderr io.Writer) error {
 		cnames := collectReferenceCNAMEs(hostResults)
 		if len(cnames) > 0 {
 			fmt.Fprintf(stderr, "checking %d reference cnames with %d local resolver groups, max concurrency %d\n", len(cnames), len(primaryGroups), cfg.DNS.MaxConcurrentQueries)
-			cnameProbes := probeLocalPriorityGroups(cnames, primaryGroups, func(resolver resolverRef, host string) dnsprobe.ResolverResult {
-				return resolver.Resolver.Probe(context.Background(), host)
-			})
+			cnameProbes := probeLocalPriorityGroups(cnames, primaryGroups, probe)
 			mergeCNAMEProbeResults(hostResults, cnameProbes, list)
 		}
 	}
@@ -211,7 +212,7 @@ type resolverGroup struct {
 	Resolvers []resolverRef
 }
 
-func buildResolverGroups(configs []config.ResolverConfig, cfg config.Config, verbose int, log io.Writer) []resolverGroup {
+func buildResolverGroups(configs []config.ResolverConfig, cfg config.Config, verbose int, log io.Writer, cache *dnsprobe.Cache) []resolverGroup {
 	classifier := dnsprobe.NewClassifier(cfg.BlockedSignals)
 	byPriority := map[int][]resolverRef{}
 	for _, resolverCfg := range configs {
@@ -224,7 +225,7 @@ func buildResolverGroups(configs []config.ResolverConfig, cfg config.Config, ver
 				classifier,
 				dnsprobe.NewExchange(resolverCfg.Address, cfg.Crawl.InsecureSkipTLSVerify),
 				dnsprobe.LogOptions{Level: verbose, Writer: log},
-			),
+			).WithCache(cache),
 		}
 		byPriority[resolverCfg.Priority] = append(byPriority[resolverCfg.Priority], ref)
 	}
@@ -296,7 +297,70 @@ func probeReferencePriorityGroups(hosts []string, groups []resolverGroup, probe 
 }
 
 func resolverWorked(result dnsprobe.ResolverResult) bool {
-	return result.Status == dnsprobe.StatusResolved || result.Status == dnsprobe.StatusBlocked || result.Status == dnsprobe.StatusNXDOMAIN
+	return result.Status == dnsprobe.StatusResolved || result.Status == dnsprobe.StatusBlocked ||
+		result.Status == dnsprobe.StatusPrivate || result.Status == dnsprobe.StatusNXDOMAIN
+}
+
+// newCrawlResolve builds a webscan.Resolve that pins the crawler's dials to
+// the internal (dns_servers) resolver's answer, falling back to the
+// reference resolvers only when the internal answer is blocked or resolves
+// to a private/loopback address. It never returns an IP that didn't come
+// from a StatusResolved result, since blocked/private classifications carry
+// the sinkhole/private address itself in their IPs field.
+func newCrawlResolve(primaryGroups, referenceGroups []resolverGroup, probe probeFunc) webscan.Resolve {
+	return func(ctx context.Context, host string) (string, bool) {
+		if len(primaryGroups) == 0 {
+			return "", false
+		}
+		primary := lastResult(probeLocalPriorityGroups([]string{host}, primaryGroups, probe)[0])
+		if primary.Status == dnsprobe.StatusResolved {
+			return firstIP(primary)
+		}
+		if (primary.Status == dnsprobe.StatusBlocked || primary.Status == dnsprobe.StatusPrivate) && len(referenceGroups) > 0 {
+			reference := lastResult(probeReferencePriorityGroups([]string{host}, referenceGroups, probe)[0])
+			if reference.Status == dnsprobe.StatusResolved {
+				return firstIP(reference)
+			}
+		}
+		return "", false
+	}
+}
+
+func lastResult(hp dnsprobe.HostProbeResult) dnsprobe.ResolverResult {
+	if len(hp.Results) == 0 {
+		return dnsprobe.ResolverResult{}
+	}
+	return hp.Results[len(hp.Results)-1]
+}
+
+func firstIP(result dnsprobe.ResolverResult) (string, bool) {
+	if len(result.Steps) == 0 {
+		return "", false
+	}
+	last := result.Steps[len(result.Steps)-1]
+	if len(last.Classification.IPs) == 0 {
+		return "", false
+	}
+	return last.Classification.IPs[0], true
+}
+
+// collectPrivateWarnings surfaces private/loopback DNS answers (from any
+// attempted resolver, not just the decisive one) as report warnings.
+func collectPrivateWarnings(results []dnsprobe.ResolverResult) []string {
+	var warnings []string
+	for _, result := range results {
+		for _, step := range result.Steps {
+			if step.Classification.Status != dnsprobe.StatusPrivate {
+				continue
+			}
+			ip := ""
+			if len(step.Classification.IPs) > 0 {
+				ip = step.Classification.IPs[0]
+			}
+			warnings = append(warnings, fmt.Sprintf("%s resolved to private address %s (%s) via resolver %s", step.Name, ip, step.Classification.BlockedBy, result.ResolverName))
+		}
+	}
+	return warnings
 }
 
 func collectReferenceCNAMEs(results []report.HostResult) []string {
@@ -364,7 +428,7 @@ func matchesForHostAndChainMembers(list blocklist.List, host string, primary []d
 			for _, cname := range step.Classification.CNAMEs {
 				recordMatches(cname)
 			}
-			if step.Classification.Status == dnsprobe.StatusBlocked {
+			if step.Classification.Status == dnsprobe.StatusBlocked || step.Classification.Status == dnsprobe.StatusPrivate {
 				normalized := strings.ToLower(strings.TrimSuffix(step.Name, "."))
 				blockedNames[normalized] = normalized
 			}

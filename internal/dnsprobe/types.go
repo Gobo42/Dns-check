@@ -5,6 +5,7 @@ type Status string
 const (
 	StatusResolved Status = "resolved"
 	StatusBlocked  Status = "blocked"
+	StatusPrivate  Status = "private"
 	StatusCNAME    Status = "cname"
 	StatusNXDOMAIN Status = "nxdomain"
 	StatusError    Status = "error"

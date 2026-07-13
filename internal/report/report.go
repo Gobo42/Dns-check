@@ -55,13 +55,13 @@ func writeBlocked(b *strings.Builder, run Run, opts Options) {
 		wroteResolvers := map[string]bool{}
 		wroteMembers := map[string]bool{}
 		for _, primary := range host.Primary {
-			if primary.Status == dnsprobe.StatusBlocked {
+			if primary.Status == dnsprobe.StatusBlocked || primary.Status == dnsprobe.StatusPrivate {
 				if !wroteResolvers[primary.ResolverName] {
 					wroteResolvers[primary.ResolverName] = true
 					fmt.Fprintf(b, "  blocked by resolver: %s\n", primary.ResolverName)
 				}
 				for _, step := range primary.Steps {
-					if step.Classification.Status == dnsprobe.StatusBlocked {
+					if step.Classification.Status == dnsprobe.StatusBlocked || step.Classification.Status == dnsprobe.StatusPrivate {
 						normalized := strings.ToLower(strings.TrimSuffix(step.Name, "."))
 						if wroteMembers[normalized] {
 							continue
@@ -164,7 +164,7 @@ func isBlocked(host HostResult) bool {
 		return true
 	}
 	for _, primary := range host.Primary {
-		if primary.Status == dnsprobe.StatusBlocked {
+		if primary.Status == dnsprobe.StatusBlocked || primary.Status == dnsprobe.StatusPrivate {
 			return true
 		}
 	}

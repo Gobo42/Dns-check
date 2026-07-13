@@ -1,9 +1,11 @@
 package webscan
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -14,9 +16,15 @@ import (
 	"dnscheck/internal/config"
 )
 
+// Resolve looks up an IP address to dial for host. ok is false when no
+// override should apply, in which case the caller falls back to default
+// (OS-level) DNS resolution.
+type Resolve func(ctx context.Context, host string) (ip string, ok bool)
+
 type Scanner struct {
-	Client *http.Client
-	Log    LogOptions
+	Client  *http.Client
+	Log     LogOptions
+	Resolve Resolve
 }
 
 type LogOptions struct {
@@ -41,7 +49,12 @@ func New(insecureSkipTLSVerify bool) Scanner {
 
 func (s Scanner) Scan(rawURL string, cfg config.CrawlConfig) (Result, error) {
 	if s.Client == nil {
-		s = New(cfg.InsecureSkipTLSVerify)
+		s.Client = New(cfg.InsecureSkipTLSVerify).Client
+	}
+	if s.Resolve != nil {
+		if transport, ok := s.Client.Transport.(*http.Transport); ok && transport.DialContext == nil {
+			transport.DialContext = s.dialContext
+		}
 	}
 	if s.Log.Level > 0 && s.Log.Writer == nil {
 		s.Log.Writer = os.Stderr
@@ -98,6 +111,18 @@ func (s Scanner) Scan(rawURL string, cfg config.CrawlConfig) (Result, error) {
 		}
 	}
 	return result, nil
+}
+
+func (s Scanner) dialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	dialer := &net.Dialer{}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil || net.ParseIP(host) != nil || s.Resolve == nil {
+		return dialer.DialContext(ctx, network, addr)
+	}
+	if ip, ok := s.Resolve(ctx, host); ok {
+		return dialer.DialContext(ctx, network, net.JoinHostPort(ip, port))
+	}
+	return dialer.DialContext(ctx, network, addr)
 }
 
 func (s Scanner) logf(level int, format string, args ...any) {

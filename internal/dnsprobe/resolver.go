@@ -95,7 +95,7 @@ func (r Resolver) Probe(ctx context.Context, host string) ResolverResult {
 		result.Steps = append(result.Steps, ChainStep{Name: current, Classification: classification})
 
 		switch classification.Status {
-		case StatusResolved, StatusBlocked, StatusNXDOMAIN, StatusError:
+		case StatusResolved, StatusBlocked, StatusPrivate, StatusNXDOMAIN, StatusError:
 			result.Status = classification.Status
 			result.Error = classification.Error
 			return result
