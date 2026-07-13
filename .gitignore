@@ -2,6 +2,7 @@ dnscheck.config
 blocked-names.txt
 dnscheck
 !dnscheck/
+graphify-out
 AGENTS.md
 CLAUDE.md
 GEMINI.md
